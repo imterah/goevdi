@@ -1,4 +1,4 @@
-package lib
+package libevdi
 
 // #include "evdi_lib.h"
 // #include "go_ffi.h"
@@ -207,14 +207,12 @@ type EvdiNode struct {
 	handle C.evdi_handle
 }
 
+// Breaks the connection between the device handle and DRM subsystem - resulting in an unplug event being processed.
 func (node *EvdiNode) Disconnect() {
 	C.evdi_disconnect(node.handle)
 }
 
-func (node *EvdiNode) Close() {
-	C.evdi_disconnect(node.handle)
-}
-
+// Registers an event handler for the device node.
 func (node *EvdiNode) RegisterEventHandler(handler *EvdiEventContext) {
 	if handler.cEventContext == nil {
 		handler.cEventContext = &C.struct_evdi_event_context{
@@ -233,6 +231,7 @@ func (node *EvdiNode) RegisterEventHandler(handler *EvdiEventContext) {
 	cEventToGoEventMapping[unsafe.Pointer(handler.cEventContext)] = handler
 }
 
+// Unregisters an event handler for the device node.
 func (node *EvdiNode) UnregisterEventHandler(handler *EvdiEventContext) error {
 	if _, ok := cEventToGoEventMapping[unsafe.Pointer(handler.cEventContext)]; !ok {
 		return fmt.Errorf("could not find event map")
@@ -249,6 +248,7 @@ func (node *EvdiNode) UnregisterEventHandler(handler *EvdiEventContext) error {
 	return nil
 }
 
+// Handles events for the device node.
 func (node *EvdiNode) HandleEvents(handler *EvdiEventContext) error {
 	if _, ok := cEventToGoEventMapping[unsafe.Pointer(handler.cEventContext)]; ok {
 		return fmt.Errorf("could not find event map")
@@ -259,6 +259,7 @@ func (node *EvdiNode) HandleEvents(handler *EvdiEventContext) error {
 	return nil
 }
 
+// Creates a connection between the EVDI and Linux DRM subsystem, resulting in kernel mode driver processing a hot plug event.
 func (node *EvdiNode) Connect(EDID []byte, pixelWidthLimit, pixelHeightLimit, FPSLimit uint) {
 	rawCEDID := C.CString(string(EDID))
 	cEDID := (*C.uchar)(unsafe.Pointer(rawCEDID))
@@ -270,10 +271,12 @@ func (node *EvdiNode) Connect(EDID []byte, pixelWidthLimit, pixelHeightLimit, FP
 	C.evdi_connect2(node.handle, cEDID, C.uint(uint(len(EDID))), C.uint(pixelAreaLimit), C.uint(pixelAreaLimit*FPSLimit))
 }
 
-func (node *EvdiNode) EnableCursorEvents(enable bool) {
+// Enables or disables cursor events for the EVDI node.
+func (node *EvdiNode) CursorEventSwitch(enable bool) {
 	C.evdi_enable_cursor_events(node.handle, C.bool(enable))
 }
 
+// Gets the file for the event ready event via a file descriptor.
 func (node *EvdiNode) GetOnReadyFile() *os.File {
 	fdC := C.evdi_get_event_ready(node.handle)
 	fd := int(fdC)
@@ -283,6 +286,7 @@ func (node *EvdiNode) GetOnReadyFile() *os.File {
 	return file
 }
 
+// This function allows to register a buffer with an opened EVDI device handle.
 func (node *EvdiNode) CreateBuffer(width, height, stride int, rect *EvdiDisplayRect) *EvdiBuffer {
 	bufferRegisterLock.Lock()
 	defer bufferRegisterLock.Unlock()
@@ -327,6 +331,7 @@ func (node *EvdiNode) CreateBuffer(width, height, stride int, rect *EvdiDisplayR
 	return buf
 }
 
+// This function unregisters a buffer from an opened EVDI device handle.
 func (node *EvdiNode) RemoveBuffer(buffer *EvdiBuffer) {
 	C.evdi_unregister_buffer(node.handle, C.int(buffer.ID))
 
@@ -334,6 +339,7 @@ func (node *EvdiNode) RemoveBuffer(buffer *EvdiBuffer) {
 	C.free(buffer.internalEvdiBuffer.buffer)
 }
 
+// Grabs pixels following the most recent update request (see EvdiNode.RequestUpdate).
 func (node *EvdiNode) GrabPixels(rect *EvdiDisplayRect) int {
 	rectNumCIntPointer := C.malloc(C.sizeof_int)
 	defer C.free(rectNumCIntPointer)
@@ -358,11 +364,12 @@ func (node *EvdiNode) GrabPixels(rect *EvdiDisplayRect) int {
 	return rectNum
 }
 
+// Requests an update for a buffer. The buffer must be already registered with the library.
 func (node *EvdiNode) RequestUpdate(buffer *EvdiBuffer) {
 	C.evdi_request_update(node.handle, C.int(buffer.ID))
 }
 
-// Creates a new EVDI node. Loosely based on `evdi_open_attached_to_fixed()`.
+// This function attempts to add (if necessary) and open a DRM device node attached to given parent device.
 func Open(parentDevice *string) (*EvdiNode, error) {
 	var parentCString *C.char
 	length := 0
@@ -387,7 +394,7 @@ func Open(parentDevice *string) (*EvdiNode, error) {
 	return node, nil
 }
 
-// Checks if Xorg is running. Based on the C function `Xorg_running()`.
+// Checks if Xorg is running.
 func IsXorgRunning() bool {
 	xorgRunningC := C.Xorg_running()
 
@@ -408,6 +415,7 @@ func GetLibraryVersion() (int, int, int) {
 	return int(version.version_major), int(version.version_minor), int(version.version_patchlevel)
 }
 
+// Sets the logger to use for logging messages.
 func SetupLogger(logger *EvdiLogger) {
 	activeLogger = logger
 }
