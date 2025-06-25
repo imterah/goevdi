@@ -27,6 +27,11 @@ var (
 	}
 )
 
+// Stride constants
+var (
+	StridePixelFormatRGBA32 = 4
+)
+
 type EvdiLogger struct {
 	Log func(message string)
 }
@@ -97,6 +102,10 @@ func goDPMSHandler(event C.int, userData unsafe.Pointer) {
 		panic("could not find Go event from C event map for EvdiEventContext")
 	}
 
+	if goData.DPMSHandler == nil {
+		return
+	}
+
 	goData.DPMSHandler(int(event))
 }
 
@@ -106,6 +115,10 @@ func goModeChangedHandler(mode C.struct_evdi_mode, userData unsafe.Pointer) {
 
 	if !ok {
 		panic("could not find Go event from C event map for EvdiEventContext")
+	}
+
+	if goData.ModeChangeHandler == nil {
+		return
 	}
 
 	goData.ModeChangeHandler(&EvdiMode{
@@ -125,6 +138,10 @@ func goUpdateReadyHandler(event C.int, userData unsafe.Pointer) {
 		panic("could not find Go event from C event map for EvdiEventContext")
 	}
 
+	if goData.UpdateReadyHandler == nil {
+		return
+	}
+
 	goData.UpdateReadyHandler(int(event))
 }
 
@@ -136,7 +153,11 @@ func goCRTCStateHandler(event C.int, userData unsafe.Pointer) {
 		panic("could not find Go event from C event map for EvdiEventContext")
 	}
 
-	goData.UpdateReadyHandler(int(event))
+	if goData.CRTCStateHandler == nil {
+		return
+	}
+
+	goData.CRTCStateHandler(int(event))
 }
 
 //export goCursorSetHandler
@@ -145,6 +166,10 @@ func goCursorSetHandler(cursor C.struct_evdi_cursor_set, userData unsafe.Pointer
 
 	if !ok {
 		panic("could not find Go event from C event map for EvdiEventContext")
+	}
+
+	if goData.CursorSetHandler == nil {
+		return
 	}
 
 	pointerBuffer := unsafe.Slice((*byte)(unsafe.Pointer(cursor.buffer)), cursor.buffer_length)
@@ -173,6 +198,10 @@ func goCursorMoveHandler(cursor C.struct_evdi_cursor_move, userData unsafe.Point
 		panic("could not find Go event from C event map for EvdiEventContext")
 	}
 
+	if goData.CursorMoveHandler == nil {
+		return
+	}
+
 	goData.CursorMoveHandler(int32(cursor.x), int32(cursor.y))
 }
 
@@ -182,6 +211,10 @@ func goDDCCIDataHandler(data C.struct_evdi_ddcci_data, userData unsafe.Pointer) 
 
 	if !ok {
 		panic("could not find Go event from C event map for EvdiEventContext")
+	}
+
+	if goData.DDCCIDataHandler == nil {
+		return
 	}
 
 	pointerBuffer := unsafe.Slice((*byte)(unsafe.Pointer(data.buffer)), data.buffer_length)
@@ -276,7 +309,8 @@ func (node *EvdiNode) CursorEventSwitch(enable bool) {
 	C.evdi_enable_cursor_events(node.handle, C.bool(enable))
 }
 
-// Gets the file for the event ready event via a file descriptor.
+// Gets the file for the event ready event via a file descriptor. This does not block. To use it, simply read with a buffer from it (tested with a 1-byte sized buffer).
+// When the buffer is read, the buffer is ready. You should still poll events after this.
 func (node *EvdiNode) GetOnReadyFile() *os.File {
 	fdC := C.evdi_get_event_ready(node.handle)
 	fd := int(fdC)
@@ -284,6 +318,18 @@ func (node *EvdiNode) GetOnReadyFile() *os.File {
 	file := os.NewFile(uintptr(fd), "evdi-fd")
 
 	return file
+}
+
+// Blocks until the event ready event is triggered. You should still poll events after this.
+func (node *EvdiNode) BlockUntilOnReady() error {
+	onReady := node.GetOnReadyFile()
+	var byte [1]byte
+
+	if _, err := onReady.Read(byte[:]); err != nil {
+		return fmt.Errorf("evdi event read failed: %w", err)
+	}
+
+	return nil
 }
 
 // This function allows to register a buffer with an opened EVDI device handle.
@@ -309,10 +355,10 @@ func (node *EvdiNode) CreateBuffer(width, height, stride int, rect *EvdiDisplayR
 		buffer: cBuffer,
 		width:  C.int(width),
 		height: C.int(height),
-		stride: C.int(stride),
+		stride: C.int(width * stride),
 
 		rects:      &evdiRect,
-		rect_count: C.int(0),
+		rect_count: C.int(1),
 	}
 
 	buf := &EvdiBuffer{
@@ -320,7 +366,7 @@ func (node *EvdiNode) CreateBuffer(width, height, stride int, rect *EvdiDisplayR
 		Buffer: normalBuffer,
 		Width:  width,
 		Height: height,
-		Stride: stride,
+		Stride: width * stride,
 
 		internalEvdiBuffer: &evdiBuffer,
 	}
@@ -364,9 +410,9 @@ func (node *EvdiNode) GrabPixels(rect *EvdiDisplayRect) int {
 	return rectNum
 }
 
-// Requests an update for a buffer. The buffer must be already registered with the library.
-func (node *EvdiNode) RequestUpdate(buffer *EvdiBuffer) {
-	C.evdi_request_update(node.handle, C.int(buffer.ID))
+// Requests an update for a buffer. The buffer must be already registered with the library. If true, the update is ready. If false, the update is not ready.
+func (node *EvdiNode) RequestUpdate(buffer *EvdiBuffer) bool {
+	return bool(C.evdi_request_update(node.handle, C.int(buffer.ID)))
 }
 
 // This function attempts to add (if necessary) and open a DRM device node attached to given parent device.

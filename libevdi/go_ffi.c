@@ -17,27 +17,27 @@ void dpmsHandler(int dpms_mode, void *user_data) {
 	goDPMSHandler(dpms_mode, user_data);
 }
 
-void* modeChangedHandler(struct evdi_mode mode, void *user_data) {
+void modeChangedHandler(struct evdi_mode mode, void *user_data) {
 	goModeChangedHandler(mode, user_data);
 }
 
-void* updateReadyHandler(int crtc_id, void *user_data) {
+void updateReadyHandler(int crtc_id, void *user_data) {
 	goUpdateReadyHandler(crtc_id, user_data);
 }
 
-void* crtcStateHandler(int crtc_state, void *user_data) {
+void crtcStateHandler(int crtc_state, void *user_data) {
 	goCRTCStateHandler(crtc_state, user_data);
 }
 
-void* cursorSetHandler(struct evdi_cursor_set cursor_set, void *user_data) {
+void cursorSetHandler(struct evdi_cursor_set cursor_set, void *user_data) {
 	goCursorSetHandler(cursor_set, user_data);
 }
 
-void* cursorMoveHandler(struct evdi_cursor_move cursor_move, void *user_data) {
+void cursorMoveHandler(struct evdi_cursor_move cursor_move, void *user_data) {
 	goCursorMoveHandler(cursor_move, user_data);
 }
 
-void* ddcciDataHandler(struct evdi_ddcci_data ddcci_data, void *user_data) {
+void ddcciDataHandler(struct evdi_ddcci_data ddcci_data, void *user_data) {
 	goDDCCIDataHandler(ddcci_data, user_data);
 }
 
