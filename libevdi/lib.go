@@ -6,26 +6,21 @@ package libevdi
 import "C"
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 
-	"log"
-
 	"golang.org/x/sys/unix"
 )
 
 var (
-	// Buffer allocation
-	currentBufNumber   = 0
-	bufferRegisterLock = sync.Mutex{}
-
 	// EVDI Event data
 	cEventToGoEventMapping = map[unsafe.Pointer]*EvdiEventContext{}
 	activeLogger           = &EvdiLogger{
 		Log: func(msg string) {
-			log.Printf("evdi: %s", msg)
+			fmt.Printf("evdi: %s\n", msg)
 		},
 	}
 )
@@ -84,6 +79,7 @@ type EvdiBuffer struct {
 	Height int
 	Stride int
 
+	rect               *EvdiDisplayRect
 	internalEvdiBuffer *C.struct_evdi_buffer
 }
 
@@ -93,7 +89,6 @@ type EvdiDisplayRect struct {
 	X2 int
 	Y2 int
 
-	hasCInit     bool
 	cDisplayRect *C.struct_evdi_rect
 }
 
@@ -236,41 +231,69 @@ func goDDCCIDataHandler(data C.struct_evdi_ddcci_data, userData unsafe.Pointer) 
 //export goLoggerHandler
 func goLoggerHandler(message *C.char) {
 	activeLogger.Log(C.GoString(message))
-	C.free(unsafe.Pointer(message))
 }
 
 type EvdiNode struct {
-	handle C.evdi_handle
+	handle             C.evdi_handle
+	currentBufNumber   int
+	bufferRegisterLock sync.Mutex
+	buffers            []*EvdiBuffer
+	eventContexts      []*EvdiEventContext
 }
 
 // Breaks the connection between the device handle and DRM subsystem - resulting in an unplug event being processed.
-func (node *EvdiNode) Disconnect() {
+func (node *EvdiNode) Disconnect() error {
+	// RemoveBuffer and UnregisterEventHandler remove the item itself from its corresponding list. So we need to start at 0 or else we'll skip items.
+	for range len(node.buffers) {
+		node.RemoveBuffer(node.buffers[0])
+	}
+
+	for range len(node.eventContexts) {
+		err := node.UnregisterEventHandler(node.eventContexts[0])
+
+		if err != nil {
+			return fmt.Errorf("failed to unregister event handler: %w", err)
+		}
+	}
+
+	node.buffers = []*EvdiBuffer{}
+	node.eventContexts = []*EvdiEventContext{}
+	node.currentBufNumber = 0
+
 	C.evdi_disconnect(node.handle)
+
+	node.handle = nil
+	return nil
 }
 
 // Registers an event handler for the device node.
-func (node *EvdiNode) RegisterEventHandler(handler *EvdiEventContext) {
-	if handler.cEventContext == nil {
-		rawEventContext := C.malloc(C.size_t(C.sizeof_struct_evdi_event_context))
-
-		if rawEventContext == nil {
-			panic("malloc() failed for rawEventContext")
-		}
-
-		handler.cEventContext = (*C.struct_evdi_event_context)(rawEventContext)
-
-		handler.cEventContext.dpms_handler = (*[0]byte)(C.dpmsHandler)
-		handler.cEventContext.mode_changed_handler = (*[0]byte)(C.modeChangedHandler)
-		handler.cEventContext.update_ready_handler = (*[0]byte)(C.updateReadyHandler)
-		handler.cEventContext.crtc_state_handler = (*[0]byte)(C.crtcStateHandler)
-		handler.cEventContext.cursor_set_handler = (*[0]byte)(C.cursorSetHandler)
-		handler.cEventContext.cursor_move_handler = (*[0]byte)(C.cursorMoveHandler)
-		handler.cEventContext.ddcci_data_handler = (*[0]byte)(C.ddcciDataHandler)
-
-		handler.cEventContext.user_data = unsafe.Pointer(handler.cEventContext)
+func (node *EvdiNode) RegisterEventHandler(handler *EvdiEventContext) error {
+	if handler.cEventContext != nil {
+		return fmt.Errorf("event handler already registered")
 	}
 
+	rawEventContext := C.malloc(C.size_t(C.sizeof_struct_evdi_event_context))
+
+	if rawEventContext == nil {
+		panic("malloc() failed for rawEventContext")
+	}
+
+	handler.cEventContext = (*C.struct_evdi_event_context)(rawEventContext)
+
+	handler.cEventContext.dpms_handler = (*[0]byte)(C.dpmsHandler)
+	handler.cEventContext.mode_changed_handler = (*[0]byte)(C.modeChangedHandler)
+	handler.cEventContext.update_ready_handler = (*[0]byte)(C.updateReadyHandler)
+	handler.cEventContext.crtc_state_handler = (*[0]byte)(C.crtcStateHandler)
+	handler.cEventContext.cursor_set_handler = (*[0]byte)(C.cursorSetHandler)
+	handler.cEventContext.cursor_move_handler = (*[0]byte)(C.cursorMoveHandler)
+	handler.cEventContext.ddcci_data_handler = (*[0]byte)(C.ddcciDataHandler)
+
+	handler.cEventContext.user_data = unsafe.Pointer(handler.cEventContext)
+
 	cEventToGoEventMapping[unsafe.Pointer(handler.cEventContext)] = handler
+	node.eventContexts = append(node.eventContexts, handler)
+
+	return nil
 }
 
 // Unregisters an event handler for the device node.
@@ -286,6 +309,11 @@ func (node *EvdiNode) UnregisterEventHandler(handler *EvdiEventContext) error {
 	}
 
 	C.free(unsafe.Pointer(handler.cEventContext))
+	handler.cEventContext = nil
+
+	node.eventContexts = slices.DeleteFunc(node.eventContexts, func(currentHandler *EvdiEventContext) bool {
+		return currentHandler == handler
+	})
 
 	return nil
 }
@@ -347,81 +375,103 @@ func (node *EvdiNode) CursorEventSwitch(enable bool) {
 }
 
 // This function allows to register a buffer with an opened EVDI device handle.
-func (node *EvdiNode) CreateBuffer(width, height, stride int, rect *EvdiDisplayRect) *EvdiBuffer {
-	bufferRegisterLock.Lock()
-	defer bufferRegisterLock.Unlock()
+func (node *EvdiNode) CreateBuffer(width, height, stride int, rect *EvdiDisplayRect) (*EvdiBuffer, error) {
+	// This *might* be fine, but I'd rather play it safe and not cause users to experience random issues
+	if rect.cDisplayRect != nil {
+		return nil, fmt.Errorf("cannot use same rect with multiple buffers")
+	}
+
+	node.bufferRegisterLock.Lock()
+	defer node.bufferRegisterLock.Unlock()
 
 	cBuffer := C.malloc(C.size_t(width * height * stride))
 	normalBuffer := unsafe.Slice((*byte)(cBuffer), width*height*stride)
 
-	evdiRect := C.struct_evdi_rect{
-		x1: C.int(rect.X1),
-		x2: C.int(rect.X2),
-		y1: C.int(rect.Y1),
-		y2: C.int(rect.Y2),
+	rawDisplayRect := C.malloc(C.size_t(C.sizeof_struct_evdi_buffer))
+
+	if rawDisplayRect == nil {
+		panic("malloc() failed for rawDisplayRect")
 	}
 
-	rect.hasCInit = true
-	rect.cDisplayRect = &evdiRect
+	rect.cDisplayRect = (*C.struct_evdi_rect)(rawDisplayRect)
+	rect.cDisplayRect.x1 = C.int(rect.X1)
+	rect.cDisplayRect.y1 = C.int(rect.Y1)
+	rect.cDisplayRect.x2 = C.int(rect.X2)
+	rect.cDisplayRect.y2 = C.int(rect.Y2)
 
 	evdiBuffer := C.struct_evdi_buffer{
-		id:     C.int(currentBufNumber),
+		id:     C.int(node.currentBufNumber),
 		buffer: cBuffer,
 		width:  C.int(width),
 		height: C.int(height),
 		stride: C.int(width * stride),
 
-		rects:      &evdiRect,
+		rects:      rect.cDisplayRect,
 		rect_count: C.int(1),
 	}
 
 	buf := &EvdiBuffer{
-		ID:     currentBufNumber,
+		ID:     node.currentBufNumber,
 		Buffer: normalBuffer,
 		Width:  width,
 		Height: height,
-		Stride: width * stride,
+		Stride: stride,
 
 		internalEvdiBuffer: &evdiBuffer,
 	}
 
 	C.evdi_register_buffer(node.handle, evdiBuffer)
-	currentBufNumber++
+	node.currentBufNumber++
 
-	return buf
+	node.buffers = append(node.buffers, buf)
+
+	return buf, nil
 }
 
 // This function unregisters a buffer from an opened EVDI device handle.
 func (node *EvdiNode) RemoveBuffer(buffer *EvdiBuffer) {
 	C.evdi_unregister_buffer(node.handle, C.int(buffer.ID))
+	C.free(unsafe.Pointer(buffer.internalEvdiBuffer.rects))
+	buffer.rect.cDisplayRect = nil
 
-	buffer.Buffer = nil
+	// Some users might still try to access the buffer after it's removed. If we don't remove it, it'll cause memory leaks. If we do remove it, we might have a use-after-free situation.
+	// So we clone the C allocated buffer into a Go slice and free the original one. This allows the GC to clean it up if they stop accessing it.
+	oldBuffer := buffer.Buffer
+
+	newBuffer := make([]byte, len(oldBuffer))
+	copy(newBuffer, oldBuffer)
+
+	buffer.Buffer = newBuffer
 	C.free(buffer.internalEvdiBuffer.buffer)
+	buffer.internalEvdiBuffer.buffer = nil
+
+	node.buffers = slices.DeleteFunc(node.buffers, func(currentBuffer *EvdiBuffer) bool {
+		return currentBuffer == buffer
+	})
 }
 
 // Grabs pixels following the most recent update request (see EvdiNode.RequestUpdate).
-func (node *EvdiNode) GrabPixels(rect *EvdiDisplayRect) int {
+func (node *EvdiNode) GrabPixels(rect *EvdiDisplayRect) (int, error) {
 	rectNumCIntPointer := C.malloc(C.sizeof_int)
 	defer C.free(rectNumCIntPointer)
 
 	rectNumCInt := (*C.int)(rectNumCIntPointer)
 
-	if !rect.hasCInit || rect.cDisplayRect == nil || int(rect.cDisplayRect.x1) != rect.X1 || int(rect.cDisplayRect.x2) != rect.X2 || int(rect.cDisplayRect.y1) != rect.Y1 || int(rect.cDisplayRect.y2) != rect.Y2 {
-		evdiRect := C.struct_evdi_rect{
-			x1: C.int(rect.X1),
-			x2: C.int(rect.X2),
-			y1: C.int(rect.Y1),
-			y2: C.int(rect.Y2),
-		}
+	if rect.cDisplayRect == nil {
+		return 0, fmt.Errorf("rect has not been initialized from CreateBuffer()")
+	}
 
-		rect.hasCInit = true
-		rect.cDisplayRect = &evdiRect
+	if int(rect.cDisplayRect.x1) != rect.X1 || int(rect.cDisplayRect.x2) != rect.X2 || int(rect.cDisplayRect.y1) != rect.Y1 || int(rect.cDisplayRect.y2) != rect.Y2 {
+		rect.cDisplayRect.x1 = C.int(rect.X1)
+		rect.cDisplayRect.x2 = C.int(rect.X2)
+		rect.cDisplayRect.y1 = C.int(rect.Y1)
+		rect.cDisplayRect.y2 = C.int(rect.Y2)
 	}
 
 	C.evdi_grab_pixels(node.handle, rect.cDisplayRect, rectNumCInt)
 
 	rectNum := int(*rectNumCInt)
-	return rectNum
+	return rectNum, nil
 }
 
 // Requests an update for a buffer. The buffer must be already registered with the library. If true, the update is ready. If false, the update is not ready.
@@ -429,8 +479,12 @@ func (node *EvdiNode) RequestUpdate(buffer *EvdiBuffer) bool {
 	return bool(C.evdi_request_update(node.handle, C.int(buffer.ID)))
 }
 
-// This function attempts to add (if necessary) and open a DRM device node attached to given parent device.
-func Open(parentDevice *string) (*EvdiNode, error) {
+// Opens a device. Alternative to Open if you want to reuse structs after closure. Else, you should probably use Open().
+func (node *EvdiNode) Open(parentDevice *string) error {
+	if node.handle != nil {
+		return fmt.Errorf("node is already open")
+	}
+
 	var parentCString *C.char
 	length := 0
 
@@ -441,14 +495,21 @@ func Open(parentDevice *string) (*EvdiNode, error) {
 		defer C.free(unsafe.Pointer(parentCString))
 	}
 
-	handle := C.evdi_open_attached_to_fixed(parentCString, C.size_t(uint(length)))
+	node.handle = C.evdi_open_attached_to_fixed(parentCString, C.size_t(uint(length)))
 
-	if handle == nil {
-		return nil, fmt.Errorf("failed to initialize EVDI node")
+	if node.handle == nil {
+		return fmt.Errorf("failed to initialize EVDI node")
 	}
 
-	node := &EvdiNode{
-		handle: handle,
+	return nil
+}
+
+// This function attempts to add (if necessary) and open a DRM device node attached to given parent device.
+func Open(parentDevice *string) (*EvdiNode, error) {
+	node := &EvdiNode{}
+
+	if err := node.Open(parentDevice); err != nil {
+		return nil, err
 	}
 
 	return node, nil

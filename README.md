@@ -4,6 +4,12 @@ The [Extensible Virtual Display Interface (EVDI)](https://github.com/DisplayLink
 
 This package provides a Go wrapper for the `libevdi` library, allowing you to easily manage Linux virtual displays.
 
+## Warning
+
+This package is still in early development and may contain bugs. Use at your own risk. Additionally, due to nature of this being in early development, the API is unstable and may change between versions.
+
+This package can work in production environments, but it is not recommended for production use until the API is stable.
+
 ## How to Use
 
 See the [Go documentation](https://pkg.go.dev/git.terah.dev/imterah/goevdi@v1.14.10/libevdi) for documentation on how to use this package. EVDI can be a bit confusing at first, so I'd recommend looking at the [example here](https://git.terah.dev/imterah/goevdi/src/branch/main/example/main.go).

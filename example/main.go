@@ -27,6 +27,12 @@ func findOptimalHorizontalRes(verticalDisplayRes float32, horizontalDisplayRes f
 }
 
 func main() {
+	libevdi.SetupLogger(&libevdi.EvdiLogger{
+		Log: func(message string) {
+			log.Printf("EVDI: %s", message)
+		},
+	})
+
 	log.Print("opening EVDI device")
 	dev, err := libevdi.Open(nil)
 
@@ -58,7 +64,11 @@ func main() {
 
 	log.Print("registering event handler and creating buffer")
 	dev.RegisterEventHandler(eventHandler)
-	buffer := dev.CreateBuffer(1920, 1080, libevdi.StridePixelFormatRGBA32, rect)
+	buffer, err := dev.CreateBuffer(1920, 1080, libevdi.StridePixelFormatRGBA32, rect)
+
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	timeoutDuration := 0 * time.Millisecond
 
