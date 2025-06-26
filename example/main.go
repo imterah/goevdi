@@ -58,7 +58,7 @@ func main() {
 
 	log.Print("registering event handler and creating buffer")
 	dev.RegisterEventHandler(eventHandler)
-	buffer := dev.CreateBuffer(1920, 1080, 4, rect)
+	buffer := dev.CreateBuffer(1920, 1080, libevdi.StridePixelFormatRGBA32, rect)
 
 	timeoutDuration := 0 * time.Millisecond
 
