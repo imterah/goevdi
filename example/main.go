@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"image"
+	"image/png"
 	"log"
 	"os"
 	"time"
@@ -51,10 +54,15 @@ func main() {
 	timeoutDuration := 1 * time.Millisecond
 	shouldRequestUpdate := true
 
+	img := &image.RGBA{
+		Stride: 1920 * 4,
+		Rect:   image.Rect(0, 0, 1920, 1080),
+	}
+
 	// HACK: sometimes the buffer doesn't get initialized properly if we don't wait a bit...
 	time.Sleep(250 * time.Millisecond)
 
-	for frame := range 100 {
+	for frame := 0; frame < 100; frame++ {
 		if shouldRequestUpdate {
 			dev.RequestUpdate(buffer)
 			shouldRequestUpdate = false
@@ -70,13 +78,29 @@ func main() {
 			dev.HandleEvents(eventHandler)
 		}
 
-		if updateReady {
-			shouldRequestUpdate = true
-			updateReady = false
+		if !updateReady {
+			log.Printf("update not ready")
+			time.Sleep(1 * time.Second)
+			frame--
+			continue
 		}
 
-		log.Print("events are ready, continuing...")
+		shouldRequestUpdate = true
+		updateReady = false
 		dev.GrabPixels(rect)
+
+		img.Pix = buffer.Buffer
+		f, err := os.OpenFile(fmt.Sprintf("photos/frame-%03d.png", frame), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if err := png.Encode(f, img); err != nil {
+			log.Fatal(err)
+		}
+
+		f.Close()
 
 		log.Printf("wrote frame %-3d", frame)
 	}
