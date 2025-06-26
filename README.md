@@ -3,7 +3,7 @@
 [![GoDoc](https://godoc.org/git.terah.dev/imterah/goevdi/libevdi?status.svg)](https://godoc.org/git.terah.dev/imterah/goevdi/libevdi)
 [![Go Report Card](https://goreportcard.com/badge/git.terah.dev/imterah/goevdi/libevdi)](https://goreportcard.com/report/git.terah.dev/imterah/goevdi/libevdi)
 [![Examples](https://img.shields.io/badge/learn%20by-examples-0077b3.svg?style=flat-square)](https://git.terah.dev/imterah/goevdi/src/branch/main/example)
-[![License](https://img.shields.io/badge/license-GNU_Lesser_General_Public_License_2.1-green)](https://git.terah.dev/imterah/goevdi/src/branch/main/LICENSE.md)
+[![License](https://img.shields.io/badge/license-GNU_Lesser_General_Public_License_2.1-green)](https://git.terah.dev/imterah/goevdi/src/branch/main/libevdi/LICENSE.md)
 
 The [Extensible Virtual Display Interface (EVDI)](https://github.com/DisplayLink/evdi) is a Linux kernel module that enables management of multiple screens, allowing user-space programs to take control over what happens with the image. It is essentially a virtual display you can add, remove and receive screen updates for, in an application that uses the `libevdi` library.
 
