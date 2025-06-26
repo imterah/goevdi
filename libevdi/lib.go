@@ -6,11 +6,14 @@ package libevdi
 import "C"
 import (
 	"fmt"
-	"os"
 	"sync"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"log"
+
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -248,15 +251,21 @@ func (node *EvdiNode) Disconnect() {
 // Registers an event handler for the device node.
 func (node *EvdiNode) RegisterEventHandler(handler *EvdiEventContext) {
 	if handler.cEventContext == nil {
-		handler.cEventContext = &C.struct_evdi_event_context{
-			dpms_handler:         (*[0]byte)(C.dpmsHandler),
-			mode_changed_handler: (*[0]byte)(C.modeChangedHandler),
-			update_ready_handler: (*[0]byte)(C.updateReadyHandler),
-			crtc_state_handler:   (*[0]byte)(C.crtcStateHandler),
-			cursor_set_handler:   (*[0]byte)(C.cursorSetHandler),
-			cursor_move_handler:  (*[0]byte)(C.cursorMoveHandler),
-			ddcci_data_handler:   (*[0]byte)(C.ddcciDataHandler),
+		rawEventContext := C.malloc(C.size_t(C.sizeof_struct_evdi_event_context))
+
+		if rawEventContext == nil {
+			panic("malloc() failed for rawEventContext")
 		}
+
+		handler.cEventContext = (*C.struct_evdi_event_context)(rawEventContext)
+
+		handler.cEventContext.dpms_handler = (*[0]byte)(C.dpmsHandler)
+		handler.cEventContext.mode_changed_handler = (*[0]byte)(C.modeChangedHandler)
+		handler.cEventContext.update_ready_handler = (*[0]byte)(C.updateReadyHandler)
+		handler.cEventContext.crtc_state_handler = (*[0]byte)(C.crtcStateHandler)
+		handler.cEventContext.cursor_set_handler = (*[0]byte)(C.cursorSetHandler)
+		handler.cEventContext.cursor_move_handler = (*[0]byte)(C.cursorMoveHandler)
+		handler.cEventContext.ddcci_data_handler = (*[0]byte)(C.ddcciDataHandler)
 
 		handler.cEventContext.user_data = unsafe.Pointer(handler.cEventContext)
 	}
@@ -281,15 +290,43 @@ func (node *EvdiNode) UnregisterEventHandler(handler *EvdiEventContext) error {
 	return nil
 }
 
-// Handles events for the device node.
+// Handles events for the device node. Be sure to wait for events to be ready before calling this function (WaitUntilEventsReady).
 func (node *EvdiNode) HandleEvents(handler *EvdiEventContext) error {
-	if _, ok := cEventToGoEventMapping[unsafe.Pointer(handler.cEventContext)]; ok {
+	if _, ok := cEventToGoEventMapping[unsafe.Pointer(handler.cEventContext)]; !ok {
 		return fmt.Errorf("could not find event map")
 	}
 
 	C.evdi_handle_events(node.handle, handler.cEventContext)
 
 	return nil
+}
+
+// Blocks until there are events waiting for polling.
+func (node *EvdiNode) WaitUntilEventsAreReadyToHandle(timeout time.Duration) (bool, error) {
+	rawFD := C.evdi_get_event_ready(node.handle)
+	fd := int(rawFD)
+
+	var readFds unix.FdSet
+	readFds.Zero()
+	readFds.Set(fd)
+
+	tv := unix.NsecToTimeval(timeout.Nanoseconds())
+
+	for {
+		n, err := unix.Select(fd+1, &readFds, nil, nil, &tv)
+
+		if err != nil {
+			// retry on EINTR
+			if err == syscall.EINTR {
+				continue
+			}
+
+			return false, fmt.Errorf("Unix select call failed: %w", err)
+		}
+
+		// If n > 0, we are ready
+		return n > 0, nil
+	}
 }
 
 // Creates a connection between the EVDI and Linux DRM subsystem, resulting in kernel mode driver processing a hot plug event.
@@ -307,29 +344,6 @@ func (node *EvdiNode) Connect(EDID []byte, pixelWidthLimit, pixelHeightLimit, FP
 // Enables or disables cursor events for the EVDI node.
 func (node *EvdiNode) CursorEventSwitch(enable bool) {
 	C.evdi_enable_cursor_events(node.handle, C.bool(enable))
-}
-
-// Gets the file for the event ready event via a file descriptor. This does not block. To use it, simply read with a buffer from it (tested with a 1-byte sized buffer).
-// When the buffer is read, the buffer is ready. You should still poll events after this.
-func (node *EvdiNode) GetOnReadyFile() *os.File {
-	fdC := C.evdi_get_event_ready(node.handle)
-	fd := int(fdC)
-
-	file := os.NewFile(uintptr(fd), "evdi-fd")
-
-	return file
-}
-
-// Blocks until the event ready event is triggered. You should still poll events after this.
-func (node *EvdiNode) BlockUntilOnReady() error {
-	onReady := node.GetOnReadyFile()
-	var byte [1]byte
-
-	if _, err := onReady.Read(byte[:]); err != nil {
-		return fmt.Errorf("evdi event read failed: %w", err)
-	}
-
-	return nil
 }
 
 // This function allows to register a buffer with an opened EVDI device handle.
